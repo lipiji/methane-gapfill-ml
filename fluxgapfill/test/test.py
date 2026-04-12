@@ -247,8 +247,8 @@ def test(
                         
                     # format output
                     scores_df = pd.DataFrame(scores)
-                    mean_scores['site'] = site
                     mean_scores = scores_df.mean().to_frame().T
+                    mean_scores['site'] = site
                     mean_scores['model'] = model
                     mean_scores['predictor_subset'] = predictor_subset
                     predictors = [

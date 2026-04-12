@@ -219,8 +219,8 @@ def get_site_budget_ranges(site, budget_date_ranges, gap_df):
             for [range_start, range_end] in budget_date_ranges[site]
         ]
     else:
-        annual_sum_year_start = gap_df['Year'].min()
-        annual_sum_year_end = gap_df['Year'].max()
+        annual_sum_year_start = gap_df['year'].min()
+        annual_sum_year_end = gap_df['year'].max()
         site_budget_date_ranges = [
             [
                 dt.datetime(year, 1, 1),
@@ -273,6 +273,6 @@ def compute_annual_budget(site, gap_df, site_budget_date_ranges):
         'budget_mean': budget_df['budget_mean'].mean(),
         'budget_uncertainty': budget_df['budget_uncertainty'].mean()
     }
-    budget_df = budget_df.append(mean_budget_dict, ignore_index=True)
+    budget_df = pd.concat([budget_df, pd.DataFrame([mean_budget_dict])], ignore_index=True)
     return budget_df
 
