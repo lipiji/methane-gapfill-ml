@@ -5,6 +5,7 @@ import pickle as pkl
 from tqdm import tqdm
 from pathlib import Path
 from collections import defaultdict
+from joblib import Parallel, delayed
 
 from fluxgapfill.models import get_model_class
 from fluxgapfill.predictors import (
@@ -12,6 +13,28 @@ from fluxgapfill.predictors import (
     check_predictors_present,
     add_all_predictors
 )
+
+
+def _train_one_fold(i, train_set, valid_set, ModelClass, predictor_subset,
+                    inner_cv, n_iter, log_metrics, model_dir,
+                    overwrite_existing_models, inner_n_jobs):
+    """Train and evaluate a single fold. Called in parallel."""
+    model_path = model_dir / f"model{i+1}.pkl"
+    if model_path.exists() and not overwrite_existing_models:
+        with model_path.open("rb") as f:
+            model_obj = pkl.load(f)
+    else:
+        model_obj = ModelClass(predictor_subset=predictor_subset,
+                               cv=inner_cv, n_iter=n_iter,
+                               inner_n_jobs=inner_n_jobs)
+        model_obj.fit(train_set, train_set['FCH4'])
+
+    fold_scores = {}
+    for metric in log_metrics:
+        fold_scores[metric] = model_obj.evaluate(valid_set, valid_set['FCH4'], metric)
+
+    model_obj.save(model_path)
+    return fold_scores
 
 
 def train(
@@ -24,6 +47,7 @@ def train(
         n_iter=20,
         log_metrics=["pr2", "nmae"],
         overwrite_existing_models=False,
+        n_jobs=-1,
         **kwargs
 ):
     """
@@ -56,7 +80,7 @@ def train(
     for each {SiteID}, {model}, and {predictor} subset.
     """
     general_args = ['sites', 'models', 'predictors', 'predictors_paths',
-                    'overwrite_existing_models']
+                    'overwrite_existing_models', 'n_jobs']
     args = locals()
     data_dir = Path(data_dir)
     if isinstance(sites, str):
@@ -139,25 +163,23 @@ def train(
                       f" - model: {model}\n" +
                       f" - predictors: {','.join(predictor_subset_print)}")
 
+                # When outer folds run in parallel, inner search uses 1 job to
+                # avoid CPU oversubscription (n_outer * n_inner >> n_cores).
+                inner_n_jobs = 1 if n_jobs != 1 else -1
+                print(f' - Training {len(train_sets)} folds (n_jobs={n_jobs})...')
+                fold_results = Parallel(n_jobs=n_jobs)(
+                    delayed(_train_one_fold)(
+                        i, train_set, valid_set, ModelClass, predictor_subset,
+                        inner_cv, n_iter, log_metrics, model_dir,
+                        overwrite_existing_models, inner_n_jobs
+                    )
+                    for i, (train_set, valid_set) in enumerate(zip(train_sets, valid_sets))
+                )
+
                 scores = defaultdict(list)
-                for i, (train_set, valid_set) in enumerate(zip(train_sets,
-                                                                    valid_sets)):
-                    print(f' - Training on {i}/{len(train_sets)}...')
-                    model_path = model_dir / f"model{i+1}.pkl"
-                    if model_path.exists() and not overwrite_existing_models:
-                        print(f"  - Loading existing model from {model_path}.")
-                        with model_path.open("rb") as f:
-                            model_obj = pkl.load(f)
-                    else:
-                        model_obj = ModelClass(predictor_subset=predictor_subset,
-                                               cv=inner_cv, n_iter=n_iter)
-                        model_obj.fit(train_set, train_set['FCH4'])
-
-                    for metric in log_metrics:
-                        score = model_obj.evaluate(valid_set, valid_set['FCH4'], metric)
+                for fold_scores in fold_results:
+                    for metric, score in fold_scores.items():
                         scores[metric].append(score)
-
-                    model_obj.save(model_path)
 
                 scores_df = pd.DataFrame(scores)
                 scores_path = model_dir / "training_results.csv"

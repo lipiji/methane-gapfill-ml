@@ -4,6 +4,7 @@ from tqdm import tqdm
 from scipy.stats import geom
 from itertools import product
 from sklearn.neighbors import KernelDensity
+from joblib import Parallel, delayed
 
 from .distances import distances
 
@@ -21,8 +22,7 @@ def get_gap_lengths(flux_data):
 
 def geom_pmf(p, support):
     """ Return truncated geometric pmf with parameter p and length support """
-    pmf = np.array([geom.pmf(x, p) for x in range(support)])
-    return pmf
+    return geom.pmf(np.arange(support), p)
 
 
 def convex_combine_geom(pmf1, p, alpha):
@@ -111,29 +111,30 @@ def sample_artificial_gaps(flux_data,
     Return:
         masked_series (np.array): time series with gaps represented as NaNs
     """
-    np.random.seed(seed)
+    rng = np.random.default_rng(seed)
     observed = np.isfinite(flux_data)
-    gap_mask = np.ones(len(flux_data))
+    gap_mask = np.ones(len(flux_data), dtype=np.int8)
+    n_observed = np.sum(observed)
 
-    prop_masked = 0.
-    while prop_masked < eval_frac:
-        # pick random index and gap length
+    # maintain available indices as a boolean mask for O(1) update
+    available = gap_mask.astype(bool)
+    n_masked = 0
+
+    while n_masked / n_observed < eval_frac:
+        available_indices = np.where(available)[0]
+        rand_idx = rng.choice(available_indices)
+        rand_gap = rng.choice(len(sampling_pmf), p=sampling_pmf)
+
         trials = 0
-        rand_idx = np.random.choice(np.where(gap_mask == 1)[0])
-        rand_gap = np.random.choice(len(sampling_pmf), p=sampling_pmf)
-
-        # retry if overlaps with previously chosen gaps
-        while np.any(gap_mask[rand_idx:rand_idx + rand_gap] == 0):
-            rand_idx = np.random.choice(np.where(gap_mask == 1)[0])
+        while np.any(~available[rand_idx:rand_idx + rand_gap]):
+            rand_idx = rng.choice(available_indices)
             trials += 1
             if trials > overlap_retries:
-                rand_gap = np.random.choice(len(sampling_pmf), p=sampling_pmf)
+                rand_gap = rng.choice(len(sampling_pmf), p=sampling_pmf)
 
-        # gap successfully added
         gap_mask[rand_idx:rand_idx + rand_gap] = 0
-
-        # recompute the total observed percentage masked
-        prop_masked = np.sum(observed * (1 - gap_mask)) / np.sum(observed)
+        available[rand_idx:rand_idx + rand_gap] = False
+        n_masked = np.sum(observed & ~available)
 
     masked_series = np.copy(flux_data)
     masked_series[gap_mask == 0] = np.nan
@@ -228,25 +229,21 @@ def learn_gap_dist(
     # Get distance function from name
     dist_fn = distances[dist]
 
-    # store best results
-    best_pmf = None
-    best_dist_score = np.inf
+    search_space = list(product(alpha_search_space, p_search_space))
 
-    for (alpha, p) in tqdm(list(product(alpha_search_space, p_search_space))):
-        # propose sampling distribution
+    def _score_params(alpha, p):
         sampling_pmf = convex_combine_geom(gap_pmf, p=p, alpha=alpha)
-
-        # score on monte carlo samples
         dist_scores = simulate_artificial_gap_samples(
             dist_fn, flux_data, gap_lengths, sampling_pmf, n_mc=n_mc
         )
+        return np.mean(dist_scores), sampling_pmf
 
-        score = np.mean(dist_scores)
+    results = Parallel(n_jobs=-1)(
+        delayed(_score_params)(alpha, p)
+        for alpha, p in tqdm(search_space, desc="Grid search")
+    )
 
-        # update best results
-        if score < best_dist_score:
-            best_dist_score = score
-            best_pmf = sampling_pmf
+    best_dist_score, best_pmf = min(results, key=lambda x: x[0])
 
     print(" - Done estimating artificial gap distribution.")
     return best_pmf

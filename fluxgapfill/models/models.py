@@ -1,3 +1,4 @@
+import subprocess
 import numpy as np
 from sklearn.linear_model import LassoCV
 from sklearn.neural_network import MLPRegressor
@@ -6,6 +7,24 @@ from xgboost.sklearn import XGBRegressor
 from sklearn.preprocessing import StandardScaler
 
 from .base import BaseModel
+
+
+def _get_xgb_gpu_params():
+    """Return XGBoost GPU params if CUDA is available, else empty dict."""
+    try:
+        subprocess.check_output(['nvidia-smi'], stderr=subprocess.DEVNULL)
+    except Exception:
+        return {}
+    try:
+        import xgboost as xgb
+        if int(xgb.__version__.split('.')[0]) >= 2:
+            return {'device': 'cuda', 'tree_method': 'hist'}
+        return {'tree_method': 'gpu_hist'}
+    except Exception:
+        return {}
+
+
+_XGB_GPU_PARAMS = _get_xgb_gpu_params()
 
 
 class Lasso(BaseModel):
@@ -45,8 +64,8 @@ class ANN(BaseModel):
                                   [(i, int(i * 0.75)) for i in range(5, 30)],
             "solver": ["lbfgs", "adam"],
             "learning_rate_init": [0.01, 0.001, 0.0001],
-            "max_iter": [100000],
-            "tol": [1e-7],
+            "max_iter": [10000],
+            "tol": [1e-4],
             "activation": ["tanh", "relu"]
         }
         self.scaler = StandardScaler()
@@ -64,10 +83,10 @@ class RandomForest(BaseModel):
     """Class for Random Forest model."""
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.model = RandomForestRegressor(n_jobs=-1)
+        self.model = RandomForestRegressor(n_jobs=1)
         self.param_dist = {
             "n_estimators": np.linspace(start=50, stop=500, num=10).astype(int),
-            "max_features": ['auto', 'sqrt'],
+            "max_features": [1.0, 'sqrt'],
             "max_depth": list(np.linspace(10, 110, num=11).astype(int)) + [None],
             "min_samples_split": [2, 5, 10],
             "min_samples_leaf": [1, 2, 4],
@@ -80,7 +99,7 @@ class XGBoost(BaseModel):
     """Class for XGBoost model."""
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.model = XGBRegressor()
+        self.model = XGBRegressor(**_XGB_GPU_PARAMS)
         self.param_dist = {
             "n_estimators": np.linspace(start=50, stop=500, num=10).astype(int),
             "max_depth": np.linspace(10, 110, num=11).astype(int),
@@ -90,10 +109,11 @@ class XGBoost(BaseModel):
             "colsample_bytree": [i / 10.0 for i in range(6, 10)],
             "objective": ["reg:squarederror"],
             "booster": ["gbtree"],
-            "n_jobs": [-1],
             "learning_rate": [0.1],
             "scale_pos_weight": [1]
         }
+        if not _XGB_GPU_PARAMS:
+            self.param_dist["n_jobs"] = [-1]
         self.scaler = None
 
 

@@ -11,10 +11,11 @@ from fluxgapfill.metrics import metric_dict
 class BaseModel(object):
     """Base class for all models."""
 
-    def __init__(self, predictor_subset, cv=5, n_iter=20):
+    def __init__(self, predictor_subset, cv=5, n_iter=20, inner_n_jobs=1):
         self.predictor_subset = predictor_subset
         self.cv = cv
         self.n_iter = n_iter
+        self.inner_n_jobs = inner_n_jobs
 
     def preprocess(self, X):
         """Prepare X to be input to the model."""
@@ -62,7 +63,7 @@ class BaseModel(object):
             n_iter=self.n_iter,
             cv=self.cv,
             scoring="neg_mean_squared_error",
-            n_jobs=-1
+            n_jobs=self.inner_n_jobs
         )
 
         random_search.fit(X, y)
